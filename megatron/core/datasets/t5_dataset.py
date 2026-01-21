@@ -314,7 +314,11 @@ class T5MaskedWordPieceDataset(MaskedWordPieceDataset):
         # For padded sequences, ensure the embedding layer can map the token ID
         encoder_input[encoder_input == self._pad_token_id] = 0
         decoder_input[decoder_input == self._pad_token_id] = 0
-        labels[labels == self._pad_token_id] = 0
+        # Use decoder_output (the labels array for loss) here. The loop variable
+        # `labels` may be undefined when no masked spans are present, which
+        # causes an UnboundLocalError. Operate on the concrete `decoder_output`
+        # NumPy array instead.
+        decoder_output[decoder_output == self._pad_token_id] = 0
 
         return {
             "text_enc": encoder_input,

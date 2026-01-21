@@ -22,6 +22,12 @@ def build_tokenizer(args):
             special_tokens = {}
             special_tokens['additional_special_tokens'] = [f'<extra_id_{i}>' for i in range(100)]
             kwargs = special_tokens
+        elif tokenizer_path == 'GPT2BPETokenizer':
+            # For T5 models, add sentinel tokens as additional special tokens
+            if not kwargs['additional_special_tokens']:
+                kwargs['additional_special_tokens'] = [f'<extra_id_{i}>' for i in range(100)]
+            # For GPT2Tokenizer, ensure pad_token is set (GPT2 doesn't have a default pad token)
+            kwargs['pad_token'] = '<pad>'
         kwargs['vocab_file'] = args.vocab_file
         kwargs['merges_file'] = args.merge_file
         kwargs['use_fast'] = args.tokenizer_hf_use_fast

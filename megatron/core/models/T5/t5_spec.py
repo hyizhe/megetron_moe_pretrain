@@ -11,6 +11,8 @@ from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
+from megatron.core.models.gpt.gpt_layer_specs import get_mlp_module_spec
+from typing import Optional
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.transformer.transformer_layer import TransformerLayer, TransformerLayerSubmodules
@@ -29,6 +31,7 @@ try:
     HAVE_TE = True
 except ImportError:
     HAVE_TE = False
+    TENorm = None  # Will be set to LNImpl below
 
 try:
     import apex  # pylint: disable=unused-import
@@ -46,9 +49,22 @@ except ImportError:
     LNImpl = WrappedTorchNorm
     HAVE_APEX = False
 
+# Set TENorm to LNImpl if TransformerEngine is not available
+if TENorm is None:
+    TENorm = LNImpl
 
-def encoder_model_with_transformer_engine_default_spec() -> ModuleSpec:
-    """T5 encoder TE spec (uses Transformer Engine components)."""
+
+def encoder_model_with_transformer_engine_default_spec(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> ModuleSpec:
+    """T5 encoder TE spec (uses Transformer Engine components).
+
+    num_experts, moe_grouped_gemm and moe_use_legacy_grouped_gemm are
+    optional hooks to create MoE MLP specs when requested by the model
+    config. Defaults maintain backward compatibility.
+    """
 
     return ModuleSpec(
         module=TransformerLayer,
@@ -65,18 +81,22 @@ def encoder_model_with_transformer_engine_default_spec() -> ModuleSpec:
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
-            mlp=ModuleSpec(
-                module=MLP,
-                submodules=MLPSubmodules(
-                    linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear
-                ),
+            mlp=get_mlp_module_spec(
+                use_te=True,
+                num_experts=num_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
             ),
             mlp_bda=get_bias_dropout_add,
         ),
     )
 
 
-def decoder_model_with_transformer_engine_default_spec() -> ModuleSpec:
+def decoder_model_with_transformer_engine_default_spec(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> ModuleSpec:
     """T5 decoder TE spec (uses Transformer Engine components)."""
 
     return ModuleSpec(
@@ -106,18 +126,22 @@ def decoder_model_with_transformer_engine_default_spec() -> ModuleSpec:
                 ),
             ),
             cross_attn_bda=get_bias_dropout_add,
-            mlp=ModuleSpec(
-                module=MLP,
-                submodules=MLPSubmodules(
-                    linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear
-                ),
+            mlp=get_mlp_module_spec(
+                use_te=True,
+                num_experts=num_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
             ),
             mlp_bda=get_bias_dropout_add,
         ),
     )
 
 
-def encoder_model_with_local_spec() -> ModuleSpec:
+def encoder_model_with_local_spec(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> ModuleSpec:
     """T5 encoder local spec (uses Megatron-Core components)."""
 
     return ModuleSpec(
@@ -137,11 +161,11 @@ def encoder_model_with_local_spec() -> ModuleSpec:
             ),
             self_attn_bda=get_bias_dropout_add,
             pre_mlp_layernorm=LNImpl,
-            mlp=ModuleSpec(
-                module=MLP,
-                submodules=MLPSubmodules(
-                    linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
-                ),
+            mlp=get_mlp_module_spec(
+                use_te=False,
+                num_experts=num_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
             ),
             mlp_bda=get_bias_dropout_add,
             sharded_state_dict_keys_map={
@@ -152,7 +176,11 @@ def encoder_model_with_local_spec() -> ModuleSpec:
     )
 
 
-def decoder_model_with_local_spec() -> ModuleSpec:
+def decoder_model_with_local_spec(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> ModuleSpec:
     """T5 decoder local spec (uses Megatron-Core components)."""
 
     return ModuleSpec(
@@ -184,11 +212,11 @@ def decoder_model_with_local_spec() -> ModuleSpec:
             ),
             cross_attn_bda=get_bias_dropout_add,
             pre_mlp_layernorm=LNImpl,
-            mlp=ModuleSpec(
-                module=MLP,
-                submodules=MLPSubmodules(
-                    linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
-                ),
+            mlp=get_mlp_module_spec(
+                use_te=False,
+                num_experts=num_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
             ),
             mlp_bda=get_bias_dropout_add,
             sharded_state_dict_keys_map={
@@ -201,6 +229,9 @@ def decoder_model_with_local_spec() -> ModuleSpec:
 
 def get_t5_encoder_with_transformer_engine_block_spec(
     num_layers: int,
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
 ) -> TransformerBlockSubmodules:
     """T5 encoder block spec for Transformer Engine
 
@@ -208,13 +239,20 @@ def get_t5_encoder_with_transformer_engine_block_spec(
       config (TransformerConfig): config, containing number of layers for encoder
     """
 
-    layer_spec = encoder_model_with_transformer_engine_default_spec()
+    layer_spec = encoder_model_with_transformer_engine_default_spec(
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+    )
     block_spec = TransformerBlockSubmodules([layer_spec] * num_layers, layer_norm=TENorm)
     return block_spec
 
 
 def get_t5_decoder_with_transformer_engine_block_spec(
     num_layers: int,
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
 ) -> TransformerBlockSubmodules:
     """T5 decoder block spec for Transformer Engine
 
@@ -222,30 +260,52 @@ def get_t5_decoder_with_transformer_engine_block_spec(
       config (TransformerConfig): config, containing number of layers for decoder
     """
 
-    layer_spec = decoder_model_with_transformer_engine_default_spec()
+    layer_spec = decoder_model_with_transformer_engine_default_spec(
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+    )
     block_spec = TransformerBlockSubmodules([layer_spec] * num_layers, layer_norm=TENorm)
     return block_spec
 
 
-def get_t5_encoder_with_local_block_spec(num_layers: int) -> TransformerBlockSubmodules:
+def get_t5_encoder_with_local_block_spec(
+    num_layers: int,
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> TransformerBlockSubmodules:
     """T5 encoder block spec for local (uses Megatron-Core components)
 
     Args:
       num_layers (int): number of encoder layers
     """
 
-    layer_spec = encoder_model_with_local_spec()
+    layer_spec = encoder_model_with_local_spec(
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+    )
     block_spec = TransformerBlockSubmodules([layer_spec] * num_layers, layer_norm=TENorm)
     return block_spec
 
 
-def get_t5_decoder_with_local_block_spec(num_layers: int) -> TransformerBlockSubmodules:
+def get_t5_decoder_with_local_block_spec(
+    num_layers: int,
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: bool = False,
+    moe_use_legacy_grouped_gemm: bool = False,
+) -> TransformerBlockSubmodules:
     """T5 decoder block spec for local (uses Megatron-Core components)
 
     Args:
       num_layers (int): number of decoder layers
     """
 
-    layer_spec = decoder_model_with_local_spec()
+    layer_spec = decoder_model_with_local_spec(
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+    )
     block_spec = TransformerBlockSubmodules([layer_spec] * num_layers, layer_norm=TENorm)
     return block_spec

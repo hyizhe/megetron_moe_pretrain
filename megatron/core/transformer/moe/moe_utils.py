@@ -35,6 +35,18 @@ try:
     HAVE_TE = True
 except ImportError:
     HAVE_TE = False
+    # Define TE-dependent symbols as None so they can be imported from this module
+    # at import-time by callers (transformer_config does this). Runtime checks
+    # below will raise informative errors if these features are actually used.
+    fused_compute_score_for_moe_aux_loss = None
+    fused_moe_aux_loss = None
+    fused_permute = None
+    fused_permute_with_probs = None
+    fused_sort_chunks_by_index = None
+    fused_sort_chunks_by_index_with_probs = None
+    fused_topk_with_score_function = None
+    fused_unpermute = None
+    te_general_gemm = None
 
 
 # MOE logging
@@ -981,7 +993,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         inp_shape = inp.shape
         inp = inp.view(-1, inp_shape[-1])
 
-        if te_general_gemm is not None and router_dtype != torch.float64:
+        if 'te_general_gemm' in globals() and te_general_gemm is not None and router_dtype != torch.float64:
             output = te_general_gemm(weight, inp, router_dtype, layout="TN", bias=bias)
             output = output[0]
         elif bias is None:
@@ -1005,7 +1017,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         inp = inp.view(-1, inp_shape[-1])
         grad_output = grad_output.view(-1, grad_shape[-1])
 
-        if te_general_gemm is not None and ctx.router_dtype != torch.float64:
+        if 'te_general_gemm' in globals() and te_general_gemm is not None and ctx.router_dtype != torch.float64:
             grad_input = te_general_gemm(
                 weight.to(ctx.router_dtype), grad_output, ctx.router_dtype, layout="NN", grad=True
             )

@@ -267,7 +267,12 @@ class HuggingFaceTokenizer(MegatronTokenizerTextAbstract):
     def inv_vocab(self) -> dict:
         """Returns tokenizer vocab with reversed keys and values."""
         if self._inv_vocab_dict == {}:
-            self._inv_vocab_dict = {v: k for k, v in self.tokenizer.vocab.items()}
+            # Handle both old and new versions of HuggingFace transformers
+            vocab = getattr(self.tokenizer, 'vocab', None)
+            if vocab is None:
+                # For newer versions, use get_vocab() method
+                vocab = self.tokenizer.get_vocab()
+            self._inv_vocab_dict = {v: k for k, v in vocab.items()}
         return self._inv_vocab_dict
 
     @property
