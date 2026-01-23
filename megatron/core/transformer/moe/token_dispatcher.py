@@ -5,6 +5,9 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
 import torch
+import os
+import time
+import torch.distributed as dist
 
 from megatron.core import utils
 from megatron.core.config import is_experimental_enabled
@@ -48,6 +51,20 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 """
 
 logger = logging.getLogger(__name__)
+def _rank0_print(msg: str):
+    """Print only on global rank 0. Works even before dist.init if needed."""
+    try:
+        if dist.is_available() and dist.is_initialized():
+            if dist.get_rank() == 0:
+                print(msg, flush=True)
+        else:
+            # Not distributed initialized yet: print once.
+            # To avoid multi-process spam, gate by env if present.
+            if os.environ.get("RANK", "0") == "0":
+                print(msg, flush=True)
+    except Exception:
+        # Ultra-safe fallback
+        print(msg, flush=True)
 
 
 class MoETokenDispatcher:
@@ -663,13 +680,70 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", self.tokens_per_expert
         )
+
+        is_backward = not permutated_local_input_tokens.requires_grad
+        phase = "BW" if is_backward else "FW"
+
+        bytes_tokens_in = permutated_local_input_tokens.numel() * permutated_local_input_tokens.element_size()
+        bytes_probs_in = permuted_probs.numel() * permuted_probs.element_size()
+
+        _rank0_print(
+            f"[MoE][EP][{phase}][DISPATCH][AlltoAll] START "
+            f"element_size={permutated_local_input_tokens.element_size()} "
+            f"tokens_in={permutated_local_input_tokens.shape} "
+            f"bytes_tokens_in={bytes_tokens_in/1e6:.2f}MB "
+            f"bytes_probs_in={bytes_probs_in/1e6:.2f}MB "
+        )
+
+        torch.cuda.synchronize()
+        t_start = time.time()
+
         global_input_tokens = all_to_all(
             self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
         )
+
+        torch.cuda.synchronize()
+        t_end = time.time()
+
+        _rank0_print(
+            f"[MoE][EP][{phase}][DISPATCH][tokens][AlltoAll] END "
+            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+        )
+
+        torch.cuda.synchronize()
+        t_start = time.time()
+
         global_probs = all_to_all(
             self.ep_group, permuted_probs, self.output_splits, self.input_splits
         )
 
+        torch.cuda.synchronize()
+        t_end = time.time()
+
+        bytes_tokens_out = global_input_tokens.numel() * global_input_tokens.element_size()
+        bytes_probs_out = global_probs.numel() * global_probs.element_size()
+
+        _rank0_print(
+            f"[MoE][EP][{phase}][DISPATCH][probs][AlltoAll] END "
+            f"tokens_out={tuple(global_input_tokens.shape)} "
+            f"bytes_tokens_out={bytes_tokens_out/1e6:.2f}MB "
+            f"bytes_probs_out={bytes_probs_out/1e6:.2f}MB "
+            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+        )
+
+        rank = utils.get_pg_rank(self.ep_group)
+
+        # ===== 关键：注册反向传播 hook（最小验证）=====
+        def _bw_hook(grad):
+            bytes_grad = grad.numel() * grad.element_size()
+            logger.info(
+                f"[MoE][EP][BW][DISPATCH][rank={rank}] grad arrived: "
+                f"shape={tuple(grad.shape)}, bytes={bytes_grad/1e6:.2f} MB"
+            )
+            return grad  # 必须原样返回
+        
+        global_input_tokens.register_hook(_bw_hook)
+        
         return global_input_tokens, global_probs
 
     def dispatch_postprocess(self, global_input_tokens, global_probs):
@@ -807,9 +881,36 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         """
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
+        phase = "FW" if torch.is_grad_enabled() else "BW"
+
+        torch.cuda.synchronize()
+        t0 = time.time()
+
         permutated_local_input_tokens = all_to_all(
             self.ep_group, hidden_states, self.input_splits, self.output_splits
         )
+
+        torch.cuda.synchronize()
+        t1 = time.time()
+
+        bytes_hidden = hidden_states.numel() * hidden_states.element_size()
+        rank = utils.get_pg_rank(self.ep_group)
+        logger.info(
+            f"[EP][COMBINE][{phase}][rank={rank}] alltoall(hidden): "
+            f"bytes={bytes_hidden/1e6:.2f} MB, time={(t1 - t0)*1000:.2f} ms"
+        )
+
+        # ===== 关键：注册反向传播 hook（最小验证）=====
+        def _bw_hook(grad):
+            bytes_grad = grad.numel() * grad.element_size()
+            logger.info(
+                f"[MoE][EP][BW][COMBINE][rank={rank}] grad arrived: "
+                f"shape={tuple(grad.shape)}, bytes={bytes_grad/1e6:.2f} MB"
+            )
+            return grad  # 必须原样返回
+
+        permutated_local_input_tokens.register_hook(_bw_hook)
+
         return permutated_local_input_tokens
 
     def combine_postprocess(self, permutated_local_input_tokens):
