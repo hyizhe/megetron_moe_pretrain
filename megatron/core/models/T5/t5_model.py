@@ -172,8 +172,23 @@ class T5Model(LanguageModule):
         self.position_embedding_type = position_embedding_type
         self.encoder_hidden_state = None
         if pg_collection is None:
+            # Request minimal process groups by default. If the transformer config
+            # signals use of MoE (num_moe_experts != None) we must also request
+            # the expert-related process groups so MoE layers can access
+            # `pg_collection.ep` and other expert groups when instantiated.
+            required_pgs = ['tp', 'cp', 'pp']
+            if getattr(self.config, 'num_moe_experts', None) is not None:
+                required_pgs += [
+                    'ep',
+                    'expt_tp',
+                    'expt_dp',
+                    'tp_ep',
+                    'tp_ep_pp',
+                    'tp_dp_cp',
+                    'tp_cp',
+                ]
             pg_collection = ProcessGroupCollection.use_mpu_process_groups(
-                required_pgs=['tp', 'cp', 'pp']
+                required_pgs=required_pgs
             )
         self.tp_group = get_tensor_model_parallel_group_if_none(pg_collection.tp)
 

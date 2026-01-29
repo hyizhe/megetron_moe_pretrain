@@ -41,8 +41,8 @@ COMMON_ARGS="
 --max-position-embeddings 1024
 --bf16
 
---micro-batch-size 8
---global-batch-size 16
+--micro-batch-size 4
+--global-batch-size 8
 
 --train-data-path /mnt/nfs/bert_data/bert_wikitext103/bert_wikitext103_text_document
 --tokenizer-type GPT2BPETokenizer
@@ -59,7 +59,7 @@ COMMON_ARGS="
 --tensor-model-parallel-size 1
 --pipeline-model-parallel-size 1
 
---num-experts 16
+--num-experts 8
 --expert-model-parallel-size 2
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss

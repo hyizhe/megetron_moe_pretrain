@@ -111,16 +111,33 @@ def model_provider(
             encoder_config.num_layers // encoder_config.pipeline_model_parallel_size
         )
         decoder_layers_per_pipeline = config.num_layers // config.pipeline_model_parallel_size
-
+        print('111111111111111111111111')
+        print(args.num_experts)
         if args.transformer_impl == "local":
-            en_block_spec = get_t5_encoder_with_local_block_spec(encoder_layers_per_pipeline)
-            de_block_spec = get_t5_decoder_with_local_block_spec(decoder_layers_per_pipeline)
+            en_block_spec = get_t5_encoder_with_local_block_spec(
+                encoder_layers_per_pipeline,
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, "moe_grouped_gemm", False),
+                moe_use_legacy_grouped_gemm=getattr(args, "moe_use_legacy_grouped_gemm", False),
+            )
+            de_block_spec = get_t5_decoder_with_local_block_spec(
+                decoder_layers_per_pipeline,
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, "moe_grouped_gemm", False),
+                moe_use_legacy_grouped_gemm=getattr(args, "moe_use_legacy_grouped_gemm", False),
+            )
         elif args.transformer_impl == "transformer_engine":
             en_block_spec = get_t5_encoder_with_transformer_engine_block_spec(
-                encoder_layers_per_pipeline
+                encoder_layers_per_pipeline,
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, "moe_grouped_gemm", False),
+                moe_use_legacy_grouped_gemm=getattr(args, "moe_use_legacy_grouped_gemm", False),
             )
             de_block_spec = get_t5_decoder_with_transformer_engine_block_spec(
-                decoder_layers_per_pipeline
+                decoder_layers_per_pipeline,
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, "moe_grouped_gemm", False),
+                moe_use_legacy_grouped_gemm=getattr(args, "moe_use_legacy_grouped_gemm", False),
             )
 
         print_rank_0('building T5 model ...')
