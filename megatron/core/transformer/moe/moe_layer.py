@@ -60,8 +60,32 @@ class BaseMoELayer(MegatronModule, ABC):
         super(BaseMoELayer, self).__init__(config)
         self.config = config
         self.layer_number = layer_number
+        # Ensure we have a pg_collection with expert-related groups. If one
+        # wasn't provided or is missing attributes, populate missing fields
+        # from the default global parallel_state collection. This makes the
+        # MoE layer robust when callers create a minimal ProcessGroupCollection
+        # without expert groups.
+        if pg_collection is None:
+            pg_collection = get_default_pg_collection()
+        else:
+            # Fill missing fields from defaults.
+            default_pg = get_default_pg_collection()
+            for attr in [
+                'ep',
+                'tp',
+                'cp',
+                'expt_tp',
+                'expt_dp',
+                'tp_ep',
+                'tp_ep_pp',
+                'tp_dp_cp',
+                'tp_cp',
+            ]:
+                if not hasattr(pg_collection, attr):
+                    setattr(pg_collection, attr, getattr(default_pg, attr))
+
         self.ep_group = pg_collection.ep
-        # use pg_collection.expt_tp_group as tensor parallel group in this module.
+        # use pg_collection.tp as tensor parallel group in this module.
         self.attn_tp_group = pg_collection.tp
         ep_size = utils.get_pg_size(self.ep_group)
         ep_rank = utils.get_pg_rank(self.ep_group)

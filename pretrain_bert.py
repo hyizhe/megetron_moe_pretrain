@@ -19,7 +19,7 @@ from megatron.training import pretrain
 from megatron.training.utils import average_losses_across_data_parallel_group
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.core.transformer.spec_utils import import_module
-from megatron.core.models.bert.bert_layer_specs import bert_layer_with_transformer_engine_spec, bert_layer_local_spec
+from megatron.core.models.bert.bert_layer_specs import bert_layer_local_spec, get_bert_layer_local_spec
 from megatron.core.tokenizers.text.utils.build_tokenizer import build_tokenizer
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.bert_dataset import BERTMaskedWordPieceDataset, BERTMaskedWordPieceDatasetConfig
@@ -48,10 +48,19 @@ def model_provider(pre_process=True, post_process=True, vp_stage=None, config=No
             post_process=post_process)
     else:
         if args.spec is None:
-            transformer_layer_spec = bert_layer_with_transformer_engine_spec #default spec
+            # Use local bert layer spec; if num_experts is provided, enable MoE
+            transformer_layer_spec = get_bert_layer_local_spec(
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, 'moe_grouped_gemm', False),
+                moe_use_legacy_grouped_gemm=getattr(args, 'moe_use_legacy_grouped_gemm', False),
+            )
         elif args.spec[0] == 'local':
             print_rank_0('Using Local spec for transformer layers')
-            transformer_layer_spec = bert_layer_local_spec
+            transformer_layer_spec = get_bert_layer_local_spec(
+                num_experts=args.num_experts,
+                moe_grouped_gemm=getattr(args, 'moe_grouped_gemm', False),
+                moe_use_legacy_grouped_gemm=getattr(args, 'moe_use_legacy_grouped_gemm', False),
+            )
         else :
             transformer_layer_spec = import_module(args.spec)
 
@@ -170,7 +179,7 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
         masking_do_full_word=True,
         masking_do_permutation=False,
         masking_use_longer_ngrams=False,
-        masking_use_geometric_distribution=False,
+        masking_use_geometric_distribution=True,
         classification_head=args.bert_binary_head,
         mid_level_dataset_surplus=args.mid_level_dataset_surplus,
         allow_ambiguous_pad_tokens=args.allow_ambiguous_pad_tokens,
@@ -178,14 +187,14 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
 
     print_rank_0('> building train, validation, and test datasets '
                  'for BERT ...')
-
+    
     train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
         BERTMaskedWordPieceDataset,
         train_val_test_num_samples,
         lambda: mpu.get_tensor_model_parallel_rank() == 0,
         config,
     ).build()
-
+    
     print_rank_0("> finished creating BERT datasets ...")
 
     return train_ds, valid_ds, test_ds
