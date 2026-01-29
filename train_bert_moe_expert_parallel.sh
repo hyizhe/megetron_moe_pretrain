@@ -43,7 +43,7 @@ COMMON_ARGS="
 --global-batch-size 16
 
 --tokenizer-type BertWordPieceLowerCase
---vocab-file /home/ubuntu/lzj/tokenizers/bert-base-uncased/vocab.txt
+--vocab-file vocab.txt
 --legacy-tokenizer
 --optimizer adam
 --lr 5e-5
