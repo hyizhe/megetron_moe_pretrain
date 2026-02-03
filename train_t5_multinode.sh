@@ -10,7 +10,7 @@ MASTER_PORT=29500
 NODE_RANK=${NODE_RANK:-0}
 
 
-NNODES=2
+NNODES=3
 # 每节点 GPU 数量，这里每台1张卡
 NPROC_PER_NODE=1
 
@@ -42,7 +42,7 @@ COMMON_ARGS="
 --bf16
 
 --micro-batch-size 4
---global-batch-size 8
+--global-batch-size 12
 
 --train-data-path /mnt/nfs/bert_data/bert_wikitext103/bert_wikitext103_text_document
 --tokenizer-type GPT2BPETokenizer
@@ -59,8 +59,8 @@ COMMON_ARGS="
 --tensor-model-parallel-size 1
 --pipeline-model-parallel-size 1
 
---num-experts 8
---expert-model-parallel-size 2
+--num-experts 9
+--expert-model-parallel-size 3
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss
 --moe-aux-loss-coeff 0.1

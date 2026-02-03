@@ -5,7 +5,7 @@ MASTER_ADDR=10.90.1.11
 MASTER_PORT=29500
 NODE_RANK=${NODE_RANK:-0}
 
-NNODES=2
+NNODES=3
 NPROC_PER_NODE=1
 
 # ========================== NCCL ==========================
@@ -39,8 +39,8 @@ COMMON_ARGS="
 --seq-length 1024
 --max-position-embeddings 1024
 
---micro-batch-size 8
---global-batch-size 16
+--micro-batch-size 16
+--global-batch-size 48
 
 --tokenizer-type BertWordPieceLowerCase
 --vocab-file vocab.txt
@@ -52,13 +52,14 @@ COMMON_ARGS="
 --train-iters 2000
 --log-interval 10
 --eval-interval 500
---eval-iters 10
+--eval-iters 0
+--eval-interval 1000000000
 --tensor-model-parallel-size 1
 --pipeline-model-parallel-size 1
 
 
---num-experts 8
---expert-model-parallel-size 2
+--num-experts 9
+--expert-model-parallel-size 3
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss
 --moe-aux-loss-coeff 0.01
