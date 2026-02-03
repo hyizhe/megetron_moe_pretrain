@@ -2,6 +2,10 @@
 
 """Pretrain T5"""
 
+import json
+import logging
+import os
+import time
 from copy import deepcopy
 from functools import partial
 from typing import Union
@@ -29,6 +33,47 @@ from megatron.training import get_args, get_tokenizer, get_timers, pretrain, pri
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.core.tokenizers import MegatronTokenizer
 from pretrain_gpt import loss_func
+
+logger = logging.getLogger(__name__)
+
+# Communication trace logging
+_json_trace_file = None
+_json_trace_enabled = os.environ.get('ENABLE_COMM_TRACE', '0') == '1'
+
+def _init_json_trace_logger():
+    """Initialize JSON trace logger file for T5."""
+    global _json_trace_file
+    if _json_trace_enabled and _json_trace_file is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        except:
+            rank = 0
+        
+        trace_dir = os.environ.get('COMM_TRACE_DIR', '~/hyz/comm_traces')
+        os.makedirs(trace_dir, exist_ok=True)
+        _json_trace_file = os.path.join(trace_dir, f'tp_trace_{int(time.time()*1000):d}_{rank:d}.jsonl')
+        
+        # Clear file if it exists
+        with open(_json_trace_file, 'w') as f:
+            f.write('')
+
+def _write_json_trace(event_dict):
+    """Write a JSON trace event for T5."""
+    global _json_trace_file
+    if not _json_trace_enabled:
+        return
+    
+    if _json_trace_file is None:
+        _init_json_trace_logger()
+    
+    try:
+        with open(_json_trace_file, 'a') as f:
+            json.dump(event_dict, f)
+            f.write('\n')
+            f.flush()
+    except Exception as e:
+        logger.warning(f"Failed to write JSON trace: {e}")
 
 """
 Pipeline parallelism for T5

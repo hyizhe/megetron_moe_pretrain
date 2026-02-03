@@ -3,6 +3,7 @@
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
+import json
 
 import torch
 import os
@@ -51,6 +52,45 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 """
 
 logger = logging.getLogger(__name__)
+
+# Global JSON trace logger
+_json_trace_file = None
+_json_trace_enabled = os.environ.get('ENABLE_COMM_TRACE', '0') == '1'
+
+def _init_json_trace_logger():
+    """Initialize JSON trace logger file."""
+    global _json_trace_file
+    if _json_trace_enabled and _json_trace_file is None:
+        try:
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        except:
+            rank = 0
+        
+        trace_dir = os.environ.get('COMM_TRACE_DIR', '~/hyz/comm_traces')
+        os.makedirs(trace_dir, exist_ok=True)
+        _json_trace_file = os.path.join(trace_dir, f'ep_trace_{int(time.time()*1000):d}_{rank:d}.jsonl')
+        
+        # Clear file if it exists
+        with open(_json_trace_file, 'w') as f:
+            f.write('')
+
+def _write_json_trace(event_dict):
+    """Write a JSON trace event."""
+    global _json_trace_file
+    if not _json_trace_enabled:
+        return
+    
+    if _json_trace_file is None:
+        _init_json_trace_logger()
+    
+    try:
+        with open(_json_trace_file, 'a') as f:
+            json.dump(event_dict, f)
+            f.write('\n')
+            f.flush()
+    except Exception as e:
+        logger.warning(f"Failed to write JSON trace: {e}")
+
 def _rank0_print(msg: str):
     """Print only on global rank 0. Works even before dist.init if needed."""
     try:
@@ -694,6 +734,14 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             f"bytes_tokens_in={bytes_tokens_in/1e6:.2f}MB "
             f"bytes_probs_in={bytes_probs_in/1e6:.2f}MB "
         )
+        
+        # Write JSON trace for tokens alltoall
+        try:
+            rank = utils.get_pg_rank(self.ep_group)
+            ep_size = utils.get_pg_size(self.ep_group)
+        except:
+            rank = 0
+            ep_size = 1
 
         torch.cuda.synchronize()
         t_start = time.time()
@@ -704,11 +752,29 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         torch.cuda.synchronize()
         t_end = time.time()
+        elapsed_ms_tokens = (t_end - t_start) * 1000
 
         _rank0_print(
             f"[MoE][EP][{phase}][DISPATCH][tokens][AlltoAll] END "
-            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+            f"elapsed_ms={elapsed_ms_tokens:.2f}"
         )
+        
+        # Write JSON trace for tokens
+        _write_json_trace({
+            'timestamp': time.time(),
+            'rank': rank,
+            'event_type': 'alltoallv',
+            'phase': phase,
+            'direction': 'dispatch',
+            'data_type': 'tokens',
+            'input_shape': list(permutated_local_input_tokens.shape),
+            'output_shape': list(global_input_tokens.shape),
+            'bytes_sent': bytes_tokens_in,
+            'bytes_received': global_input_tokens.numel() * global_input_tokens.element_size(),
+            'elapsed_ms': elapsed_ms_tokens,
+            'group_size': ep_size,
+            'layer_id': 0,
+        })
 
         torch.cuda.synchronize()
         t_start = time.time()
@@ -719,6 +785,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         torch.cuda.synchronize()
         t_end = time.time()
+        elapsed_ms_probs = (t_end - t_start) * 1000
 
         bytes_tokens_out = global_input_tokens.numel() * global_input_tokens.element_size()
         bytes_probs_out = global_probs.numel() * global_probs.element_size()
@@ -728,10 +795,25 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             f"tokens_out={tuple(global_input_tokens.shape)} "
             f"bytes_tokens_out={bytes_tokens_out/1e6:.2f}MB "
             f"bytes_probs_out={bytes_probs_out/1e6:.2f}MB "
-            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+            f"elapsed_ms={elapsed_ms_probs:.2f}"
         )
-
-        rank = utils.get_pg_rank(self.ep_group)
+        
+        # Write JSON trace for probs
+        _write_json_trace({
+            'timestamp': time.time(),
+            'rank': rank,
+            'event_type': 'alltoallv',
+            'phase': phase,
+            'direction': 'dispatch',
+            'data_type': 'probs',
+            'input_shape': list(permuted_probs.shape),
+            'output_shape': list(global_probs.shape),
+            'bytes_sent': bytes_probs_in,
+            'bytes_received': bytes_probs_out,
+            'elapsed_ms': elapsed_ms_probs,
+            'group_size': ep_size,
+            'layer_id': 0,
+        })
 
         # ===== 关键：注册反向传播 hook（最小验证）=====
         def _bw_hook(grad):
@@ -892,13 +974,34 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         torch.cuda.synchronize()
         t1 = time.time()
+        elapsed_ms = (t1 - t0) * 1000
 
         bytes_hidden = hidden_states.numel() * hidden_states.element_size()
+        bytes_output = permutated_local_input_tokens.numel() * permutated_local_input_tokens.element_size()
         rank = utils.get_pg_rank(self.ep_group)
+        ep_size = utils.get_pg_size(self.ep_group)
+        
         logger.info(
             f"[EP][COMBINE][{phase}][rank={rank}] alltoall(hidden): "
-            f"bytes={bytes_hidden/1e6:.2f} MB, time={(t1 - t0)*1000:.2f} ms"
+            f"bytes={bytes_hidden/1e6:.2f} MB, time={elapsed_ms:.2f} ms"
         )
+        
+        # Write JSON trace for combine
+        _write_json_trace({
+            'timestamp': time.time(),
+            'rank': rank,
+            'event_type': 'alltoallv',
+            'phase': phase,
+            'direction': 'combine',
+            'data_type': 'hidden_states',
+            'input_shape': list(hidden_states.shape),
+            'output_shape': list(permutated_local_input_tokens.shape),
+            'bytes_sent': bytes_hidden,
+            'bytes_received': bytes_output,
+            'elapsed_ms': elapsed_ms,
+            'group_size': ep_size,
+            'layer_id': 0,
+        })
 
         # ===== 关键：注册反向传播 hook（最小验证）=====
         def _bw_hook(grad):

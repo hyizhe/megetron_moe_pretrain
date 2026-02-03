@@ -1,11 +1,17 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+import logging
+import os
+import time
+
 import torch
 
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.utils import get_tensor_model_parallel_group_if_none, is_torch_min_version
 
 from .utils import split_tensor_along_last_dim
+
+logger = logging.getLogger(__name__)
 
 try:
     if is_torch_min_version("1.13.0"):
@@ -535,6 +541,19 @@ def reduce_scatter_last_dim_to_tensor_parallel_region(input_, group=None):
 def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None):
     """Wrapper for autograd function"""
     assert group is not None, "group should not be None"
+    
+    # Log all-to-all event
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_available() and torch.distributed.is_initialized() else 0
+    except:
+        rank = 0
+    
+    bytes_sent = input_.numel() * input_.element_size()
+    phase = "BW" if not torch.is_grad_enabled() else "FW"
+    
+    torch.cuda.synchronize()
+    t_start = time.time()
+    
     return _AllToAll.apply(group, input_, output_split_sizes_, input_split_sizes)
 
 
@@ -557,13 +576,43 @@ def all_to_all_sp2hp(input_, group=None):
     """
     group = get_tensor_model_parallel_group_if_none(group)
 
+    # Log communication
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_available() and torch.distributed.is_initialized() else 0
+    except:
+        rank = 0
+    
     world_size = group.size()
+    phase = "BW" if not torch.is_grad_enabled() else "FW"
+    bytes_sent = input_.numel() * input_.element_size()
+    
+    logger.info(
+        f"[TP][{phase}][ALLTOALL_SP2HP] START "
+        f"rank={rank}, world_size={world_size}, "
+        f"input_shape={input_.shape}, bytes={bytes_sent/1e6:.2f}MB"
+    )
+    
+    torch.cuda.synchronize()
+    t_start = time.time()
+    
     input_ = input_.reshape(-1, input_.shape[-1])
     split_tensors = torch.split(
         input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
     )
     concat_tensor = torch.cat(split_tensors, dim=0)
     output = all_to_all(group, concat_tensor)
+    
+    torch.cuda.synchronize()
+    t_end = time.time()
+    bytes_received = output.numel() * output.element_size()
+    
+    logger.info(
+        f"[TP][{phase}][ALLTOALL_SP2HP] END "
+        f"output_shape={output.shape}, "
+        f"bytes_received={bytes_received/1e6:.2f}MB, "
+        f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+    )
+    
     return output
 
 
@@ -585,7 +634,25 @@ def all_to_all_hp2sp(input_, group=None):
     """
     group = get_tensor_model_parallel_group_if_none(group)
 
+    # Log communication
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_available() and torch.distributed.is_initialized() else 0
+    except:
+        rank = 0
+    
     world_size = group.size()
+    phase = "BW" if not torch.is_grad_enabled() else "FW"
+    bytes_sent = input_.numel() * input_.element_size()
+    
+    logger.info(
+        f"[TP][{phase}][ALLTOALL_HP2SP] START "
+        f"rank={rank}, world_size={world_size}, "
+        f"input_shape={input_.shape}, bytes={bytes_sent/1e6:.2f}MB"
+    )
+    
+    torch.cuda.synchronize()
+    t_start = time.time()
+    
     input_ = input_.reshape(-1, input_.shape[-1])
     input_exchanged = all_to_all(group, input_)
     input_reshaped = input_exchanged.reshape(-1, input_exchanged.shape[-1])
@@ -593,4 +660,16 @@ def all_to_all_hp2sp(input_, group=None):
         input_reshaped, split_size_or_sections=input_reshaped.shape[0] // world_size, dim=0
     )
     output = torch.cat(split_tensors, dim=-1)
+    
+    torch.cuda.synchronize()
+    t_end = time.time()
+    bytes_received = output.numel() * output.element_size()
+    
+    logger.info(
+        f"[TP][{phase}][ALLTOALL_HP2SP] END "
+        f"output_shape={output.shape}, "
+        f"bytes_received={bytes_received/1e6:.2f}MB, "
+        f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+    )
+    
     return output

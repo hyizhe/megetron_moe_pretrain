@@ -2,6 +2,10 @@
 
 """Pretrain BERT"""
 
+import json
+import logging
+import os
+import time
 from functools import partial
 
 import torch
@@ -26,6 +30,47 @@ from megatron.core.datasets.bert_dataset import BERTMaskedWordPieceDataset, BERT
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core import mpu, tensor_parallel
 from megatron.core.tokenizers import MegatronTokenizer
+
+logger = logging.getLogger(__name__)
+
+# Communication trace logging
+_json_trace_file = None
+_json_trace_enabled = os.environ.get('ENABLE_COMM_TRACE', '0') == '1'
+
+def _init_json_trace_logger():
+    """Initialize JSON trace logger file for BERT."""
+    global _json_trace_file
+    if _json_trace_enabled and _json_trace_file is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        except:
+            rank = 0
+        
+        trace_dir = os.environ.get('COMM_TRACE_DIR', '~/hyz/comm_traces')
+        os.makedirs(trace_dir, exist_ok=True)
+        _json_trace_file = os.path.join(trace_dir, f'bert_trace_{int(time.time()*1000):d}_{rank:d}.jsonl')
+        
+        # Clear file if it exists
+        with open(_json_trace_file, 'w') as f:
+            f.write('')
+
+def _write_json_trace(event_dict):
+    """Write a JSON trace event for BERT."""
+    global _json_trace_file
+    if not _json_trace_enabled:
+        return
+    
+    if _json_trace_file is None:
+        _init_json_trace_logger()
+    
+    try:
+        with open(_json_trace_file, 'a') as f:
+            json.dump(event_dict, f)
+            f.write('\n')
+            f.flush()
+    except Exception as e:
+        logger.warning(f"Failed to write JSON trace: {e}")
 
 
 def model_provider(pre_process=True, post_process=True, vp_stage=None, config=None, pg_collection=None):

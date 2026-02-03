@@ -15,6 +15,11 @@ export NCCL_SOCKET_IFNAME=enp6s18
 export NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
+# ========================== COMM TRACE ==========================
+# Enable communication tracing for alltoall operations
+export ENABLE_COMM_TRACE=1
+export COMM_TRACE_DIR=~/hyz/comm_traces_bert
+
 # ========================== COMMON ARGS ==========================
 COMMON_ARGS="
 --use-mcore-models
