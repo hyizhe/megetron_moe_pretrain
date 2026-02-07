@@ -26,6 +26,66 @@ from megatron.core.datasets.bert_dataset import BERTMaskedWordPieceDataset, BERT
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core import mpu, tensor_parallel
 from megatron.core.tokenizers import MegatronTokenizer
+ 
+# ---- MoE trace helpers (ported from pretrain_gpt) ----
+def _unwrap_model(m):
+    # unwrap DDP / FSDP / pipeline wrappers
+    from megatron.core.utils import get_attr_wrapped_model
+    for attr in ["module", "model", "language_model"]:
+        try:
+            m = get_attr_wrapped_model(m, attr)
+        except Exception:
+            pass
+    while hasattr(m, "module"):
+        m = m.module
+    return m
+
+
+def _get_all_moe_dispatchers(model):
+    m = _unwrap_model(model)
+    dispatchers = []
+    for name, mod in m.named_modules():
+        if hasattr(mod, "token_dispatcher"):
+            dispatchers.append((mod.token_dispatcher, name))
+    return dispatchers
+
+
+def _next_trace_step_id():
+    if not hasattr(_next_trace_step_id, "i"):
+        _next_trace_step_id.i = 0
+    i = _next_trace_step_id.i
+    _next_trace_step_id.i += 1
+    return i
+
+
+def _install_moe_layer_id_hooks_once(model):
+    m = _unwrap_model(model)
+    installed = getattr(_install_moe_layer_id_hooks_once, "_installed", False)
+    if installed:
+        return
+    for name, mod in m.named_modules():
+        if hasattr(mod, "token_dispatcher"):
+            disp = mod.token_dispatcher
+
+            def _pre_hook(module, inputs, _disp=disp, _name=name):
+                try:
+                    _disp._current_moe_block_id = _name
+                except Exception:
+                    pass
+
+            def _post_hook(module, inputs, outputs, _disp=disp):
+                try:
+                    _disp._current_moe_block_id = None
+                except Exception:
+                    pass
+
+            mod.register_forward_pre_hook(_pre_hook)
+            mod.register_forward_hook(_post_hook)
+
+    _install_moe_layer_id_hooks_once._installed = True
+    print_rank_0("[TRACE] MoE dispatcher layer-id hooks installed.")
+
+# ---- end MoE trace helpers ----
 
 
 def model_provider(pre_process=True, post_process=True, vp_stage=None, config=None, pg_collection=None):
@@ -146,8 +206,25 @@ def forward_step(data_iterator, model):
         types = None
 
     # Forward pass through the model.
+    # Install layer-id hooks and start batch trace (if any MoE dispatchers exist)
+    _install_moe_layer_id_hooks_once(model)
+    dispatchers = _get_all_moe_dispatchers(model)
+    if dispatchers:
+        batch_id = _next_trace_step_id()
+        try:
+            dispatchers[0][0].start_trace_batch(batch_id, moe_block_id=None)
+        except Exception:
+            pass
+
     output_tensor = model(tokens, padding_mask,
                           tokentype_ids=types, lm_labels=lm_labels)
+
+    # End batch trace if started
+    if dispatchers:
+        try:
+            dispatchers[0][0].end_trace_batch()
+        except Exception:
+            pass
 
     return output_tensor, partial(loss_func, loss_mask, sentence_order)
 

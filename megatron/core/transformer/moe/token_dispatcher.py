@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 import torch
 import os
 import time
+import datetime
 import torch.distributed as dist
 
 from megatron.core import utils
@@ -49,6 +50,143 @@ from megatron.core.transformer.transformer_config import TransformerConfig
      num_local_tokens: S/TP*B
      num_global_tokens: num_local_tokens*TP*EP
 """
+
+import json
+
+# ============================================================
+# Run-level trace id (shared by all ranks in this job)
+# ============================================================
+_TRACE_RUN_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+class EPTraceRecorder:
+    def __init__(self, rank, ep_group_ranks, output_dir="/home/ubuntu/hyz/moe_traces"):
+        self.rank = rank
+        self.ep_group_ranks = ep_group_ranks
+        self.current_batch = None
+        os.makedirs(output_dir, exist_ok=True)
+        self.path = os.path.join(output_dir, f"ep_trace_{_TRACE_RUN_ID}_rank{rank}.jsonl")
+
+    def start_batch(self, batch_id):
+        self.current_batch = {
+            "rank_id": self.rank,
+            "ep_group_ranks": self.ep_group_ranks,
+            "batch_id": batch_id,
+            "batch_start_time(s)": time.perf_counter(),
+            "ep_events": [],
+        }
+
+    def end_batch(self):
+        if self.current_batch is None:
+            return
+        self.current_batch["batch_end_time(s)"] = time.perf_counter()
+        self.flush()
+        self.current_batch = None
+
+    def record_event(self, **kwargs):
+        if self.current_batch is not None:
+            self.current_batch["ep_events"].append(kwargs)
+
+    def flush(self):
+        with open(self.path, "a") as f:
+            f.write(json.dumps(self.current_batch) + "\n")
+
+class TracedEPAllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input,
+        ep_group,
+        input_splits,
+        output_splits,
+        recorder,
+        moe_block_id,
+        phase,      # "FW"
+        op_name,    # "DISPATCH" or "COMBINE"
+    ):
+        ctx.ep_group = ep_group
+        ctx.input_splits = input_splits
+        ctx.output_splits = output_splits
+        ctx.recorder = recorder
+        ctx.moe_block_id = moe_block_id
+        ctx.op_name = op_name
+
+        elem_size = input.element_size()
+        hidden_dim = input.size(1)
+
+        # -------- FW timing --------
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+
+        output = all_to_all(
+            ep_group,
+            input,
+            output_splits,
+            input_splits,
+        )
+
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+
+        # -------- per-peer bytes --------
+        send_bytes = {
+            int(r): int(cnt * hidden_dim * elem_size)
+            for r, cnt in enumerate(input_splits)
+        }
+        recv_bytes = {
+            int(r): int(cnt * hidden_dim * elem_size)
+            for r, cnt in enumerate(output_splits)
+        }
+
+        recorder.record_event(
+            moe_block_id=moe_block_id,
+            phase="FW",
+            op=op_name,
+            start_time_s=t_start,
+            end_time_s=t_end,
+            send_bytes_per_rank=send_bytes,
+            recv_bytes_per_rank=recv_bytes,
+        )
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        elem_size = grad_output.element_size()
+        hidden_dim = grad_output.size(1)
+
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+
+        grad_input = all_to_all(
+            ctx.ep_group,
+            grad_output,
+            ctx.input_splits,
+            ctx.output_splits,
+        )
+
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+
+        send_bytes = {
+            int(r): int(cnt * hidden_dim * elem_size)
+            for r, cnt in enumerate(ctx.output_splits)
+        }
+        recv_bytes = {
+            int(r): int(cnt * hidden_dim * elem_size)
+            for r, cnt in enumerate(ctx.input_splits)
+        }
+
+        # ctx.recorder.record_event(
+        #     moe_block_id=ctx.moe_block_id,
+        #     phase="BW",
+        #     op=ctx.op_name,
+        #     start_time_s=t_start,
+        #     end_time_s=t_end,
+        #     send_bytes_per_rank=send_bytes,
+        #     recv_bytes_per_rank=recv_bytes,
+        # )
+
+        return grad_input, None, None, None, None, None, None, None
 
 logger = logging.getLogger(__name__)
 def _rank0_print(msg: str):
@@ -362,6 +500,26 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         return hidden_states.view(self.hidden_shape)
 
 
+_TRACE_RECORDER_CACHE = {}
+
+def _get_shared_trace_recorder(ep_group, output_dir="/home/ubuntu/hyz/moe_traces"):
+    # key 用 (global_rank, ep_group_id)；ep_group_id 可用 id(ep_group) 近似
+    try:
+        rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0"))
+    except Exception:
+        rank = int(os.environ.get("RANK", "0"))
+    key = (rank, id(ep_group))
+    if key in _TRACE_RECORDER_CACHE:
+        return _TRACE_RECORDER_CACHE[key]
+
+    # 这里的 ep_group_ranks 你当前写的是 0..ep_size-1（相对 rank），先保留；
+    # 如果你希望记录 global ranks，需要进一步映射 group ranks -> global ranks。
+    ep_group_ranks = list(range(utils.get_pg_size(ep_group)))
+    rec = EPTraceRecorder(rank, ep_group_ranks, output_dir=output_dir)
+    _TRACE_RECORDER_CACHE[key] = rec
+    return rec
+
+
 class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     """
     AlltoAll-based token dispatcher.
@@ -475,6 +633,24 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         ]
 
         self.shared_experts = None
+
+        # rank = utils.get_pg_rank(self.ep_group)
+        # ep_group_ranks = list(range(utils.get_pg_size(self.ep_group)))
+        # self.trace_recorder = EPTraceRecorder(rank, ep_group_ranks)
+        # self._current_moe_block_id = 0
+        self.trace_recorder = _get_shared_trace_recorder(self.ep_group)
+        self._current_moe_block_id = None
+
+    # def start_trace_batch(self, batch_id, moe_block_id):
+    #     self._current_moe_block_id = moe_block_id
+    #     self.trace_recorder.start_batch(batch_id)
+
+    def start_trace_batch(self, batch_id, moe_block_id=None):
+        # batch 级别：不绑定具体 MoE 层
+        self.trace_recorder.start_batch(batch_id)
+
+    def end_trace_batch(self):
+        self.trace_recorder.end_batch()
 
     def set_shared_experts(self, shared_experts):
         """Set shared expert to the dispatcher."""
@@ -687,28 +863,38 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         bytes_tokens_in = permutated_local_input_tokens.numel() * permutated_local_input_tokens.element_size()
         bytes_probs_in = permuted_probs.numel() * permuted_probs.element_size()
 
-        _rank0_print(
-            f"[MoE][EP][{phase}][DISPATCH][AlltoAll] START "
-            f"element_size={permutated_local_input_tokens.element_size()} "
-            f"tokens_in={permutated_local_input_tokens.shape} "
-            f"bytes_tokens_in={bytes_tokens_in/1e6:.2f}MB "
-            f"bytes_probs_in={bytes_probs_in/1e6:.2f}MB "
-        )
+        # _rank0_print(
+        #     f"[MoE][EP][{phase}][DISPATCH][AlltoAll] START "
+        #     f"element_size={permutated_local_input_tokens.element_size()} "
+        #     f"tokens_in={permutated_local_input_tokens.shape} "
+        #     f"bytes_tokens_in={bytes_tokens_in/1e6:.2f}MB "
+        #     f"bytes_probs_in={bytes_probs_in/1e6:.2f}MB "
+        # )
 
         torch.cuda.synchronize()
         t_start = time.time()
 
-        global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+        # global_input_tokens = all_to_all(
+        #     self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+        # )
+        global_input_tokens = TracedEPAllToAll.apply(
+            permutated_local_input_tokens,
+            self.ep_group,
+            self.input_splits,
+            self.output_splits,
+            self.trace_recorder,
+            self._current_moe_block_id,
+            "FW",
+            "DISPATCH",
         )
 
         torch.cuda.synchronize()
         t_end = time.time()
 
-        _rank0_print(
-            f"[MoE][EP][{phase}][DISPATCH][tokens][AlltoAll] END "
-            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
-        )
+        # _rank0_print(
+        #     f"[MoE][EP][{phase}][DISPATCH][tokens][AlltoAll] END "
+        #     f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+        # )
 
         torch.cuda.synchronize()
         t_start = time.time()
@@ -723,13 +909,13 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         bytes_tokens_out = global_input_tokens.numel() * global_input_tokens.element_size()
         bytes_probs_out = global_probs.numel() * global_probs.element_size()
 
-        _rank0_print(
-            f"[MoE][EP][{phase}][DISPATCH][probs][AlltoAll] END "
-            f"tokens_out={tuple(global_input_tokens.shape)} "
-            f"bytes_tokens_out={bytes_tokens_out/1e6:.2f}MB "
-            f"bytes_probs_out={bytes_probs_out/1e6:.2f}MB "
-            f"elapsed_ms={(t_end - t_start)*1000:.2f}"
-        )
+        # _rank0_print(
+        #     f"[MoE][EP][{phase}][DISPATCH][probs][AlltoAll] END "
+        #     f"tokens_out={tuple(global_input_tokens.shape)} "
+        #     f"bytes_tokens_out={bytes_tokens_out/1e6:.2f}MB "
+        #     f"bytes_probs_out={bytes_probs_out/1e6:.2f}MB "
+        #     f"elapsed_ms={(t_end - t_start)*1000:.2f}"
+        # )
 
         rank = utils.get_pg_rank(self.ep_group)
 
@@ -742,7 +928,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             )
             return grad  # 必须原样返回
         
-        global_input_tokens.register_hook(_bw_hook)
+        # global_input_tokens.register_hook(_bw_hook)
         
         return global_input_tokens, global_probs
 
@@ -886,8 +1072,18 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         torch.cuda.synchronize()
         t0 = time.time()
 
-        permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
+        # permutated_local_input_tokens = all_to_all(
+        #     self.ep_group, hidden_states, self.input_splits, self.output_splits
+        # )
+        permutated_local_input_tokens = TracedEPAllToAll.apply(
+            hidden_states,
+            self.ep_group,
+            self.output_splits,
+            self.input_splits,
+            self.trace_recorder,
+            self._current_moe_block_id,
+            "FW",
+            "COMBINE",
         )
 
         torch.cuda.synchronize()
@@ -909,7 +1105,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             )
             return grad  # 必须原样返回
 
-        permutated_local_input_tokens.register_hook(_bw_hook)
+        # permutated_local_input_tokens.register_hook(_bw_hook)
 
         return permutated_local_input_tokens
 
