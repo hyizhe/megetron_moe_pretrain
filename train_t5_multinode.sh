@@ -51,7 +51,7 @@ COMMON_ARGS="
 
 --optimizer adam
 --lr 1e-4
---train-iters 300
+--train-iters 10
 --log-interval 10
 --eval-interval 1000000000
 --eval-iters 0

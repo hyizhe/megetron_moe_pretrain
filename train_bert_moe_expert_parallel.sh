@@ -49,7 +49,7 @@ COMMON_ARGS="
 --lr 5e-5
 --clip-grad 1.0
 --bf16
---train-iters 2000
+--train-iters 10
 --log-interval 10
 --eval-interval 500
 --eval-iters 0
