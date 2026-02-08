@@ -365,6 +365,11 @@ class MoELayer(BaseMoELayer):
             try:
                 shared_expert_output = self.shared_experts_compute(hidden_states)
                 probs, routing_map = self.route(hidden_states)
+
+                # >>> 插入：记录 gate_end（当前层、当前batch） <<<
+                if hasattr(self.token_dispatcher, "mark_gate_end"):
+                    self.token_dispatcher.mark_gate_end(phase="FW")
+                
                 hidden_states, probs = self.preprocess(hidden_states, probs, routing_map)
             except MoECudaGraphPartialCaptureSignal as e:
                 # This signal is raised from the maybe_skip_or_early_return_by_cudagraph decorator.
