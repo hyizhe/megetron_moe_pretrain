@@ -46,10 +46,10 @@ COMMON_ARGS="
 --vocab-file vocab.txt
 --legacy-tokenizer
 --optimizer adam
---lr 5e-5
+--lr 1e-4
 --clip-grad 1.0
 --bf16
---train-iters 10
+--train-iters 100
 --log-interval 10
 --eval-interval 500
 --eval-iters 0
@@ -58,8 +58,8 @@ COMMON_ARGS="
 --pipeline-model-parallel-size 1
 
 
---num-experts 9
---expert-model-parallel-size 3
+--num-experts 32
+--expert-model-parallel-size 8
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss
 --moe-aux-loss-coeff 0.01
