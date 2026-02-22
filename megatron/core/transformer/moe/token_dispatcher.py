@@ -645,6 +645,23 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     #     self._current_moe_block_id = moe_block_id
     #     self.trace_recorder.start_batch(batch_id)
 
+    def mark_gate_end(self, phase="FW"):
+        """
+        Record the end time of MoE routing (gate) for the current layer.
+        This should be called immediately after router(hidden_states).
+        """
+        if self.trace_recorder is None:
+            return
+        if self._current_moe_block_id is None:
+            return
+
+        self.trace_recorder.record_event(
+            moe_block_id=self._current_moe_block_id,
+            phase=phase,
+            op="GATE_END",
+            time_s=time.perf_counter(),
+        )
+        
     def start_trace_batch(self, batch_id, moe_block_id=None):
         # batch 级别：不绑定具体 MoE 层
         self.trace_recorder.start_batch(batch_id)
