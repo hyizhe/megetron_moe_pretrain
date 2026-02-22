@@ -59,7 +59,7 @@ COMMON_ARGS="
 --tensor-model-parallel-size 1
 --pipeline-model-parallel-size 1
 
---num-experts 32
+--num-experts 16
 --expert-model-parallel-size 8
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss
