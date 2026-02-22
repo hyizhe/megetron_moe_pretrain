@@ -5,7 +5,7 @@ MASTER_ADDR=10.90.1.11
 MASTER_PORT=29500
 NODE_RANK=${NODE_RANK:-0}
 
-NNODES=3
+NNODES=8
 NPROC_PER_NODE=1
 
 # ========================== NCCL ==========================
