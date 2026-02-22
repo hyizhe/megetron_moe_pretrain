@@ -41,8 +41,8 @@ COMMON_ARGS="
 --max-position-embeddings 1024
 --bf16
 
---micro-batch-size 8
---global-batch-size 64
+--micro-batch-size 2
+--global-batch-size 16
 
 --train-data-path /mnt/nfs/bert_data/bert_wikitext103/bert_wikitext103_text_document
 --tokenizer-type GPT2BPETokenizer

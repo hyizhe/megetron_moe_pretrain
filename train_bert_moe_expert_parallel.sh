@@ -39,8 +39,8 @@ COMMON_ARGS="
 --seq-length 1024
 --max-position-embeddings 1024
 
---micro-batch-size 16
---global-batch-size 48
+--micro-batch-size 2
+--global-batch-size 16
 
 --tokenizer-type BertWordPieceLowerCase
 --vocab-file vocab.txt
