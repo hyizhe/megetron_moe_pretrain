@@ -39,8 +39,8 @@ COMMON_ARGS="
 --seq-length 1024
 --max-position-embeddings 1024
 
---micro-batch-size 2
---global-batch-size 16
+--micro-batch-size 4
+--global-batch-size 32
 
 --tokenizer-type BertWordPieceLowerCase
 --vocab-file vocab.txt
@@ -58,7 +58,7 @@ COMMON_ARGS="
 --pipeline-model-parallel-size 1
 
 
---num-experts 16
+--num-experts 32
 --expert-model-parallel-size 8
 --moe-router-topk 2
 --moe-router-load-balancing-type aux_loss
